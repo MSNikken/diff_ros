@@ -1,0 +1,16 @@
+numpy
+einops
+torch
+rospy
+scipy
+pypose
+gym
+pyyaml
+params_proto==2.9.6 # conflicts with ml_logger
+rospkg
+ml_logger
+wandb
+typed-argument-parser
+mujoco_py
+mujoco
+tqdm
