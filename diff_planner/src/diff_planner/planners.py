@@ -162,7 +162,6 @@ def pose_franka2pytorch(msg, **kwargs):
 
 class PosePlanner(object):
     def __init__(self, planner: DiffPlanner):
-        rospy.init_node('diff_planner', anonymous=True)
         self.planner = planner
         self.dt_plan = planner.dt_plan
         self.dt_sample = self.dt_plan if not hasattr(planner, 'dt_sample') else planner.dt_sample
@@ -237,16 +236,18 @@ class PosePlanner(object):
 
 
 def run_node():
-    config_file = rospy.get_param('config_file', None)
-    wandb_path = rospy.get_param('wandb_path', None)
-    pt_file = rospy.get_param('pt_file', None)
-    mock = rospy.get_param('mock', True)
+    rospy.init_node('diff_planner', anonymous=True)
+    config_file = rospy.get_param('~config_file', None)
+    wandb_file = rospy.get_param('~wandb_file', None)
+    pt_file = rospy.get_param('~pt_file', None)
+    mock = rospy.get_param('~mock', True)
 
     if mock:
-        print('Launching mock implementation.')
+        print('Launching mock planner.')
         planner = PosePlanner(MockPlanner(10, 0.08, 7, 7, 'cuda'))
     else:
-        model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_path)
+        print('Launching diffusion planner.')
+        model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_file)
         planner = PosePlanner(
             GausInvDynPlanner(model, model.horizon, 0.08, 0.08, 7, 7, 'cuda')
         )

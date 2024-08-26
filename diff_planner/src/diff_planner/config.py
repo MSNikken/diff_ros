@@ -7,7 +7,7 @@ import yaml
 from params_proto.neo_proto import ParamsProto
 
 import diffuser.utils as utils
-#comment
+
 
 class Config(ParamsProto):
     # misc
