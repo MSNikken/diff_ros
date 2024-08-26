@@ -1,5 +1,4 @@
 import time
-import warnings
 from typing import TypeVar
 
 import einops
@@ -8,6 +7,7 @@ import torch
 import rospy
 import actionlib
 import tf.transformations
+import pypose as pp
 from diff_planner.config import load_diff_model
 from diffuser.utils import apply_dict
 from franka_msgs.msg import FrankaState
@@ -48,18 +48,28 @@ class BaseDiffusionPlanner(object):
     def update_plan(self):
         raise NotImplementedError
 
-    def get_setpoint(self, t=None):
-        action_index = self.get_index(t)
+    def get_setpoint(self, t=None, interpolate=None):
+        action_index, remainder = self.get_index(t, remainder=True)
+        final = action_index >= self.horizon - 1
         print(f'Getting action {action_index}')
-        if action_index >= self.horizon:
-            warnings.warn('No planned action')
-            return None, None
-        return self.action[action_index], action_index == self.horizon-1
+        if final:
+            return self.action[-1], True
 
-    def get_index(self, t=None):
+        if interpolate is None:
+            setpoint = self.action[action_index],
+        else:
+            setpoint = interpolate(self.action[action_index], self.action[action_index+1], remainder)
+        return setpoint, final
+
+    def get_index(self, t=None, remainder=False):
         if t is None:
             t = time.time_ns()
-        return int((t - self.plan_t_start) / (self.dt_plan * 1e9))
+        index_unrounded = (t - self.plan_t_start) / (self.dt_plan * 1e9)
+        index = int(index_unrounded)
+        if remainder:
+            decimal = index_unrounded - index
+            return index, decimal
+        return index
 
     def set_plan_start(self, t=None):
         self.plan_t_start = t if t is not None else time.time_ns()
@@ -128,7 +138,7 @@ def pose_ros2pytorch(pose_stamped: PoseStamped, **kwargs):
     return pose
 
 
-def pose_pytorch2ros(pose: torch.Tensor, counter: int):
+def pose_pytorch2ros(pose: torch.Tensor, counter: int, norm=True):
     pose_stamped = PoseStamped()
     pose_stamped.header.seq = counter
     pose_stamped.header.stamp = rospy.Time.now()
@@ -138,6 +148,8 @@ def pose_pytorch2ros(pose: torch.Tensor, counter: int):
     pose_stamped.pose.position.y = pose[1]
     pose_stamped.pose.position.z = pose[2]
 
+    if norm:
+        pose[3:] = pose[3:] / torch.linalg.vector_norm(pose[3:])
     pose_stamped.pose.orientation.x = pose[3]
     pose_stamped.pose.orientation.y = pose[4]
     pose_stamped.pose.orientation.z = pose[5]
@@ -160,8 +172,17 @@ def pose_franka2pytorch(msg, **kwargs):
     return pose
 
 
+def interpolate_poses(pose1, pose2, ratio):
+    interp = torch.empty((7,), device=pose1.device)
+    interp[0:3] = pose1[0:3] + (pose2[0:3] - pose1[0:3]) * ratio
+    rot1 = pp.SO3(pose1[3:] / torch.linalg.vector_norm(pose1[3:]))
+    rot2 = pp.SO3(pose2[3:] / torch.linalg.vector_norm(pose2[3:]))
+    interp[3:0] = (rot1 + (rot2 * rot1.Inv()).Log() * ratio).tensor()
+    return interp
+
+
 class PosePlanner(object):
-    def __init__(self, planner: DiffPlanner):
+    def __init__(self, planner: DiffPlanner, interpolate=None):
         self.planner = planner
         self.dt_plan = planner.dt_plan
         self.dt_sample = self.dt_plan if not hasattr(planner, 'dt_sample') else planner.dt_sample
@@ -169,11 +190,13 @@ class PosePlanner(object):
         self.sub = rospy.Subscriber('franka_state_controller/franka_states', FrankaState, self.observation_cb)
         self.pub = rospy.Publisher('setpoint', PoseStamped, queue_size=1)
 
+        self.interpolate = interpolate
         self.last_pose = torch.empty((7,), device=self.planner.device)
         self.setpoint = torch.empty((7,), device=self.planner.device)
         self.goal = torch.empty((7,), device=self.planner.device)
         self.counter = 0
         self.final = False
+
 
         self._as = actionlib.SimpleActionServer('plan', PlanPathAction,
                                                 execute_cb=self.plan_cb, auto_start=False)
@@ -190,7 +213,10 @@ class PosePlanner(object):
 
     def publish_cb(self, *args):
         setpoint = pose_pytorch2ros(self.setpoint, self.counter)
-        #rospy.loginfo(f'Publishing: {setpoint}')
+        # Safety
+        setpoint.pose.position.x = torch.clamp(setpoint.pose.position.x, min=0.3, max=0.5)
+        setpoint.pose.position.y = torch.clamp(setpoint.pose.position.y, min=-0.25, max=0.25)
+        setpoint.pose.position.z = torch.clamp(setpoint.pose.position.z, min=0.3, max=0.6)
         self.pub.publish(setpoint)
         self.counter += 1
 
@@ -222,7 +248,7 @@ class PosePlanner(object):
             rospy.loginfo('Planner reached final state')
             return None
 
-        setpoint, self.final = self.planner.get_setpoint()
+        setpoint, self.final = self.planner.get_setpoint(interpolate=self.interpolate)
 
         if setpoint is None:
             rospy.logwarn('No setpoint available')
@@ -236,11 +262,11 @@ class PosePlanner(object):
 
 
 def run_node():
-    rospy.init_node('diff_planner', anonymous=True)
+    rospy.init_node('diff_planner', anonymous=False)
     config_file = rospy.get_param('~config_file', None)
     wandb_file = rospy.get_param('~wandb_file', None)
     pt_file = rospy.get_param('~pt_file', None)
-    mock = rospy.get_param('~mock', True)
+    mock = rospy.get_param('~mock', False)
 
     if mock:
         print('Launching mock planner.')
@@ -249,7 +275,8 @@ def run_node():
         print('Launching diffusion planner.')
         model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_file)
         planner = PosePlanner(
-            GausInvDynPlanner(model, model.horizon, 0.08, 0.08, 7, 7, 'cuda')
+            GausInvDynPlanner(model, model.horizon, 0.08, 0.08, 7, 7, 'cuda'),
+            interpolate=interpolate_poses
         )
 
 
