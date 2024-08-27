@@ -16,8 +16,7 @@ from diff_planner_msgs.msg import PlanPathAction
 
 
 class BaseDiffusionPlanner(object):
-    def __init__(self, horizon, dt_plan, state_dim, action_dim, device, t_start=None, replan_every=None,
-                 pause_on_replan=False):
+    def __init__(self, horizon, dt_plan, state_dim, action_dim, device, t_start=None, replan_every=None):
         self.device = device
         self.horizon = horizon
         self.state_dim = state_dim
@@ -30,7 +29,7 @@ class BaseDiffusionPlanner(object):
         self.obs_indices = set()
         self.latest_obs = torch.empty(state_dim, device=device)
         self.replan_every = replan_every if replan_every is not None else horizon
-        self.pause_on_replan = pause_on_replan
+
         self.last_replan_index = 0
         self.last_replan_time = self.plan_t_start
 
@@ -53,9 +52,7 @@ class BaseDiffusionPlanner(object):
 
         self.update_plan()
 
-    def replan(self, start_index, t=None, pause=False):
-        if pause:
-            self.action[start_index:] = self.action[start_index-1]
+    def replan(self, start_index, t=None):
         self.last_replan_index = start_index    # Before updating plan to correctly shift conditions
         self.update_plan(start_index=start_index)
         self.last_replan_time = t if t is not None else time.time_ns()
@@ -72,7 +69,7 @@ class BaseDiffusionPlanner(object):
             return self.action[-1], True
 
         if action_index > self.replan_every and action_index - self.last_replan_index >= self.replan_every:
-            self.replan(action_index, t=t, pause=self.pause_on_replan)
+            self.replan(action_index, t=t)
 
         if interpolate is None:
             setpoint = self.action[action_index],
@@ -103,7 +100,7 @@ class MockPlanner(BaseDiffusionPlanner):
 
 
 class GausInvDynPlanner(BaseDiffusionPlanner):
-    def __init__(self, model, horizon, dt_plan, dt_sample, state_dim, action_dim, device, mode='pos', min_horizon=0,
+    def __init__(self, model, horizon, dt_plan, state_dim, action_dim, device, mode='pos', min_horizon=0,
                  **kwargs):
         super().__init__(horizon, dt_plan, state_dim, action_dim, device, **kwargs)
         if mode not in ['pos', 'vel']:
@@ -112,15 +109,11 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         self.model = model
         self.min_horizon = min_horizon
 
-        assert dt_sample >= dt_plan
-        self.dt_sample = dt_sample
-        self.sample_step_index = int(np.round(dt_sample / dt_plan))
-
     def update_plan(self, start_index=0):
         self.sample_plan(self.horizon-start_index)
         if self.mode == 'pos':
-            self.action[:-self.sample_step_index] = self.plan[1:self.horizon-self.sample_step_index+1, :7]
-            self.action[-self.sample_step_index:] = self.plan[-1, :7]
+            self.action[0:-1] = self.plan[1:, :7]
+            self.action[-1] = self.plan[-1, :7]
         else:
             raise NotImplementedError
             # self.action[now:-self.sample_step_index] = self.plan[now + 1:, 7:13]
@@ -311,8 +304,8 @@ def run_node():
         print('Launching diffusion planner.')
         model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_file)
         planner = PosePlanner(
-            GausInvDynPlanner(model, model.horizon, 0.08, 0.08, 7, 7, device,
-                              replan_every=12, min_horizon=7, pause_on_replan=False),
+            GausInvDynPlanner(model, model.horizon, 0.08, 7, 7, device,
+                              replan_every=12, min_horizon=7),
             interpolate=interpolate_poses,
         )
 
