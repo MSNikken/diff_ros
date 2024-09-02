@@ -236,9 +236,11 @@ def best_plan(unnorm_plan, fn=None):
 
 
 class PosePlanner(object):
-    def __init__(self, planner: DiffPlanner, interpolate=None, clamped=True, safe_dist=0.05, safe_rot=np.pi/18):
+    def __init__(self, planner: DiffPlanner, interpolate=None, clamped=True, dt_publish=None,
+                 safe_dist=0.05, safe_rot=np.pi/18):
         self.planner = planner
         self.dt_plan = planner.dt_plan
+        self.dt_publish = self.dt_plan if dt_publish is None else dt_publish
         self.dt_sample = self.dt_plan if not hasattr(planner, 'dt_sample') else planner.dt_sample
 
         self.sub = rospy.Subscriber('franka_state_controller/franka_states', FrankaState, self.observation_cb)
@@ -260,7 +262,7 @@ class PosePlanner(object):
         self._as.start()
 
         self.wait_for_initial_pose()
-        rospy.Timer(rospy.Duration(self.dt_plan), self.publish_cb)
+        rospy.Timer(rospy.Duration(self.dt_publish), self.publish_cb)
         rospy.spin()
 
     def observation_cb(self, obs):
@@ -371,7 +373,8 @@ def run_node():
             interpolate=interpolate_poses,
             clamped=True,
             safe_dist=1,
-            safe_rot=3.2
+            safe_rot=3.2,
+            dt_publish=0.02
         )
 
 
