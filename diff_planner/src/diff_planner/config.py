@@ -92,6 +92,7 @@ def load_diff_model(pt_file=None, config_file=None, wandb_path=None):
         # Retrieve parameters
         pt_file = wandb.restore('checkpoint/state.pt', run_path=wandb_path).name
 
+    print(f'Retrieving parameters from: {pt_file}')
     diff_exp = utils.load_diffusion_from_config(Config, pt_file)
     return diff_exp.ema
 
