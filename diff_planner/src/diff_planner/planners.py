@@ -245,6 +245,7 @@ class PosePlanner(object):
 
         self.sub = rospy.Subscriber('franka_state_controller/franka_states', FrankaState, self.observation_cb)
         self.pub = rospy.Publisher('setpoint', PoseStamped, queue_size=1)
+        self.pub_updates = rospy.Publisher('setpoint_updates', PoseStamped, queue_size=1)
 
         self.interpolate = interpolate
         self.last_pose = torch.empty((7,), device=self.planner.device)
@@ -331,6 +332,7 @@ class PosePlanner(object):
 
     def update_setpoint(self, new):
         self.setpoint = new
+        self.pub_updates.publish(pose_pytorch2ros(new, self.counter))
 
     def next_pose(self):
         if self.final:
@@ -363,8 +365,8 @@ def run_node():
         model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_file)
         planner = PosePlanner(
             GausInvDynPlanner(
-                model, model.horizon, 0.08, 7, 7, device,
-                replan_every=13, min_horizon=7, returns=-0.005, n_samples=5,
+                model, 100, 0.08, 7, 7, device,
+                replan_every=30, min_horizon=32, returns=-0.01, n_samples=5,
                 rew_fn=partial(
                     diffuser.datasets.reward.discounted_trajectory_rewards,
                     zones=[], discount=0.99, kin_rel_weight=0.5, kin_norm=True
