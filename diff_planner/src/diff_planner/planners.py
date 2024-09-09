@@ -6,7 +6,7 @@ import einops
 import numpy as np
 import torch
 
-import diffuser.datasets.reward
+import diffuser.datasets.reward as reward
 import rospy
 import actionlib
 import tf.transformations
@@ -63,6 +63,18 @@ class BaseDiffusionPlanner(object):
     def update_plan(self, start_index=0):
         raise NotImplementedError
 
+    def update_horizon(self, new_horizon):
+        goal = self.plan[-1]
+        if new_horizon > self.horizon:
+            add_len = new_horizon - self.horizon
+            self.plan = torch.cat([self.plan, torch.empty((add_len, self.state_dim), device=self.device)])
+            self.action = torch.cat([self.action, torch.empty((add_len, self.state_dim), device=self.device)])
+        else:
+            self.plan = self.plan[:new_horizon]
+            self.action = self.action[:new_horizon]
+        self.plan[-1] = goal
+        self.horizon = new_horizon
+
     def get_setpoint(self, t=None, interpolate=None):
         action_index, remainder = self.get_index(t=t, remainder=True)
         final = action_index >= self.horizon - 1
@@ -71,7 +83,8 @@ class BaseDiffusionPlanner(object):
             print(f'Final action t={t}, tstart={self.plan_t_start}')
             return self.action[-1], True
 
-        if action_index > self.replan_every and action_index - self.last_replan_index >= self.replan_every:
+        if (action_index > self.replan_every and action_index - self.last_replan_index >= self.replan_every
+                and torch.linalg.vector_norm(self.plan[-1][:3] - self.latest_obs[:3]) > 0.10):
             self.replan(action_index, t=t)
 
         if interpolate is None:
@@ -104,7 +117,7 @@ class MockPlanner(BaseDiffusionPlanner):
 
 class GausInvDynPlanner(BaseDiffusionPlanner):
     def __init__(self, model, horizon, dt_plan, state_dim, action_dim, device, mode='pos', min_horizon=0, rew_fn=None,
-                 n_samples=1, returns=None, **kwargs):
+                 n_samples=1, returns=None, auto=False, vel=0.005, **kwargs):
         super().__init__(horizon, dt_plan, state_dim, action_dim, device, **kwargs)
         if mode not in ['pos', 'vel']:
             raise AttributeError('Invalid action mode.')
@@ -114,9 +127,16 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         self.rew_fn = rew_fn
         self.n_samples = n_samples
         self.returns = returns
+        assert auto and rew_fn is not None or not auto
+        self.auto = auto
+        self.vel = vel
 
     def update_plan(self, start_index=0):
-        self.sample_plan(self.horizon - start_index, n_samples=self.n_samples, returns=self.returns)
+        if self.auto:
+            self.auto_plan(start_index)
+        else:
+            self.sample_plan(self.horizon - start_index, n_samples=self.n_samples, returns=self.returns)
+
         if self.mode == 'pos':
             self.action[0:-1] = self.plan[1:, :7]
             self.action[-1] = self.plan[-1, :7]
@@ -136,7 +156,7 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         if horizon < self.min_horizon:
             add_states = self.min_horizon - horizon
         add_states += (4 - (horizon + add_states) % 4) % 4  # Find next multiple of 4
-        horizon += add_states
+        sample_horizon = horizon + add_states
 
         norm_plan = self.model.normalizer.normalize(self.plan, 'observations')
         print('Getting conditions...')
@@ -160,11 +180,22 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
             returns = None
 
         print('Forward pass...')
-        norm_plan = self.model.conditional_sample(conditions, horizon=horizon, returns=returns)
+        norm_plan = self.model.conditional_sample(conditions, horizon=sample_horizon, returns=returns)
         print('Unnormalizing...')
         unnorm_plan = self.model.normalizer.unnormalize(norm_plan, 'observations')[:, :horizon]
         best_plan_index = best_plan(unnorm_plan, self.rew_fn)
         self.plan[-horizon:] = unnorm_plan[best_plan_index]
+
+    def auto_plan(self, start_index):
+        start = self.latest_obs
+        goal = self.plan[-1]
+        return_estimate = (self.rew_fn(start[None, None, :]) + self.rew_fn(goal[None, None, :])) / 10 + 0.01
+        return_estimate = torch.clamp(return_estimate, min=-0.15, max=0)
+        horizon_estimate = max(int(torch.linalg.vector_norm(goal[:3] - start[:3])/self.vel), self.min_horizon) + start_index
+        horizon_estimate = min(max(horizon_estimate, self.min_horizon), 10*self.min_horizon)
+        self.update_horizon(horizon_estimate)
+        print(f'Auto sampling with return: {return_estimate} and horizon to go: {self.horizon - start_index}')
+        self.sample_plan(self.horizon - start_index, n_samples=self.n_samples, returns=return_estimate)
 
 
 DiffPlanner = TypeVar('DiffPlanner', bound=BaseDiffusionPlanner)
@@ -237,14 +268,15 @@ def best_plan(unnorm_plan, fn=None):
 
 class PosePlanner(object):
     def __init__(self, planner: DiffPlanner, interpolate=None, clamped=True, dt_publish=None,
-                 safe_dist=0.05, safe_rot=np.pi/18):
+                 safe_dist=0.05, safe_rot=np.pi/18, pos_only=False):
         self.planner = planner
         self.dt_plan = planner.dt_plan
         self.dt_publish = self.dt_plan if dt_publish is None else dt_publish
         self.dt_sample = self.dt_plan if not hasattr(planner, 'dt_sample') else planner.dt_sample
 
         self.sub = rospy.Subscriber('franka_state_controller/franka_states', FrankaState, self.observation_cb)
-        self.pub = rospy.Publisher('setpoint', PoseStamped, queue_size=1)
+        #self.pub = rospy.Publisher('setpoint', PoseStamped, queue_size=1)
+        self.pub = rospy.Publisher('cartesian_impedance_example_controller/equilibrium_pose', PoseStamped, queue_size=1)
         self.pub_updates = rospy.Publisher('setpoint_updates', PoseStamped, queue_size=1)
 
         self.interpolate = interpolate
@@ -257,6 +289,7 @@ class PosePlanner(object):
         self.clamped = clamped
         self.safe_dist = safe_dist
         self.safe_rot = safe_rot
+        self.pos_only = pos_only
 
         self._as = actionlib.SimpleActionServer('plan', PlanPathAction,
                                                 execute_cb=self.plan_cb, auto_start=False)
@@ -275,6 +308,13 @@ class PosePlanner(object):
         setpoint = pose_pytorch2ros(self.setpoint, self.counter)
 
         # Safety
+        if self.pos_only:
+            setpoint.pose.orientation.x = 1.0
+            setpoint.pose.orientation.y = 0.0
+            setpoint.pose.orientation.z = 0.0
+            setpoint.pose.orientation.w = 0.0
+
+
         if self.clamped:
             setpoint.pose.position.x = torch.clamp(setpoint.pose.position.x, min=0.3, max=0.5)
             setpoint.pose.position.y = torch.clamp(setpoint.pose.position.y, min=-0.25, max=0.25)
@@ -365,17 +405,19 @@ def run_node():
         model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_file)
         planner = PosePlanner(
             GausInvDynPlanner(
-                model, 100, 0.08, 7, 7, device,
-                replan_every=30, min_horizon=32, returns=-0.01, n_samples=5,
+                model, 121, 0.08, 7, 7, device, auto=False,
+                replan_every=70, min_horizon=32, returns=-0.01, n_samples=5,
                 rew_fn=partial(
-                    diffuser.datasets.reward.discounted_trajectory_rewards,
-                    zones=[], discount=0.99, kin_rel_weight=0.5, kin_norm=True
+                    reward.discounted_trajectory_rewards,
+                    zones=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)], discount=0.99,
+                    dist_scale=0.1, kin_rel_weight=0, kin_norm=True
                 )
             ),
             interpolate=interpolate_poses,
             clamped=True,
             safe_dist=1,
             safe_rot=3.2,
+            pos_only=True,
             dt_publish=0.02
         )
 
