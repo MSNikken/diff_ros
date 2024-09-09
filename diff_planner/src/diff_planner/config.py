@@ -8,6 +8,25 @@ from params_proto.neo_proto import ParamsProto
 
 import diffuser.utils as utils
 
+wandb_dict = runpaths = {
+    'ddb': 'dl_rob/diffusion/i2ff19p3',
+    'kdb': 'dl_rob/diffusion/m8isvw5o',
+    'ddbr': 'dl_rob/diffusion/u3i0kjj8',
+    'kdbr': 'dl_rob/diffusion/vei4ird6',
+    'ddbf': 'dl_rob/diffusion/8w3vif8e',
+    'kdbf': 'dl_rob/diffusion/a4leduhr',
+    'ddbrf': 'dl_rob/diffusion/x1xp7na1',
+    'kdbrf': 'dl_rob/diffusion/h9fk00mt',
+    'ddb2': 'dl_rob/diffusion/5t0sxiys',
+    'kdb2': 'dl_rob/diffusion/xpm2hkj3',
+    'ddbr2': 'dl_rob/diffusion/1f6z3xeb',
+    'kdbr2': 'dl_rob/diffusion/stnlg8gn',
+    'ddbf2': 'dl_rob/diffusion/j4xxf9oy',
+    'kdbf2': 'dl_rob/diffusion/eqvxqf7s',
+    'ddbrf2': 'dl_rob/diffusion/39nhtqjg',
+    'kdbrf2': 'dl_rob/diffusion/j7bsphez',
+    'dsb2': 'dl_rob/diffusion/mynpt464',
+}
 
 class Config(ParamsProto):
     # misc
