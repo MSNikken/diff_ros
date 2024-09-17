@@ -117,7 +117,7 @@ class MockPlanner(BaseDiffusionPlanner):
 
 class GausInvDynPlanner(BaseDiffusionPlanner):
     def __init__(self, model, horizon, dt_plan, state_dim, action_dim, device, mode='pos', min_horizon=0, rew_fn=None,
-                 n_samples=1, returns=None, auto=False, vel=0.005, **kwargs):
+                 n_samples=1, returns=None, auto=False, vel=0.005, shift=None, **kwargs):
         super().__init__(horizon, dt_plan, state_dim, action_dim, device, **kwargs)
         if mode not in ['pos', 'vel']:
             raise AttributeError('Invalid action mode.')
@@ -130,6 +130,9 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         assert auto and rew_fn is not None or not auto
         self.auto = auto
         self.vel = vel
+        if shift is None:
+            shift = [0.0, 0.0, 0.0]
+        self.shift = torch.tensor(shift + [0.0, 0.0, 0.0, 0.0], device=device)
 
     def update_plan(self, start_index=0):
         if self.auto:
@@ -158,10 +161,11 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         add_states += (4 - (horizon + add_states) % 4) % 4  # Find next multiple of 4
         sample_horizon = horizon + add_states
 
-        norm_plan = self.model.normalizer.normalize(self.plan, 'observations')
+        unnorm_plan = self.plan - self.shift
+        norm_plan = self.model.normalizer.normalize(unnorm_plan, 'observations')
         print('Getting conditions...')
         # conditions = {i-self.last_replan_index: norm_plan[i][None, :] for i in self.obs_indices}
-        conditions = {0: self.model.normalizer.normalize(self.latest_obs, 'observations')[None, :],
+        conditions = {0: self.model.normalizer.normalize(self.latest_obs - self.shift, 'observations')[None, :],
                       -1: norm_plan[-1][None, :]}
 
         # Place additional states
@@ -184,7 +188,7 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         print('Unnormalizing...')
         unnorm_plan = self.model.normalizer.unnormalize(norm_plan, 'observations')[:, :horizon]
         best_plan_index = best_plan(unnorm_plan, self.rew_fn)
-        self.plan[-horizon:] = unnorm_plan[best_plan_index]
+        self.plan[-horizon:] = unnorm_plan[best_plan_index] + self.shift
 
     def auto_plan(self, start_index):
         start = self.latest_obs
@@ -309,16 +313,15 @@ class PosePlanner(object):
 
         # Safety
         if self.pos_only:
-            setpoint.pose.orientation.x = 1.0
-            setpoint.pose.orientation.y = 0.0
+            setpoint.pose.orientation.x = 0.7071
+            setpoint.pose.orientation.y = 0.7071
             setpoint.pose.orientation.z = 0.0
             setpoint.pose.orientation.w = 0.0
-
 
         if self.clamped:
             setpoint.pose.position.x = torch.clamp(setpoint.pose.position.x, min=0.3, max=0.5)
             setpoint.pose.position.y = torch.clamp(setpoint.pose.position.y, min=-0.25, max=0.25)
-            setpoint.pose.position.z = torch.clamp(setpoint.pose.position.z, min=0.3, max=0.6)
+            setpoint.pose.position.z = torch.clamp(setpoint.pose.position.z, min=0.09, max=0.6)
 
         setpoint_pos = torch.tensor(
             [
@@ -397,6 +400,7 @@ def run_node():
     pt_file = rospy.get_param('~pt_file', None)
     mock = rospy.get_param('~mock', False)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f'Using device: {device}')
     if mock:
         print('Launching mock planner.')
         planner = PosePlanner(MockPlanner(10, 0.08, 7, 7, device))
@@ -405,20 +409,21 @@ def run_node():
         model = load_diff_model(pt_file=pt_file, config_file=config_file, wandb_path=wandb_file)
         planner = PosePlanner(
             GausInvDynPlanner(
-                model, 121, 0.08, 7, 7, device, auto=False,
-                replan_every=70, min_horizon=32, returns=-0.01, n_samples=5,
+                model, 120, 0.08, 7, 7, device, auto=False,
+                replan_every=61, min_horizon=32, returns=0, n_samples=5,
                 rew_fn=partial(
                     reward.discounted_trajectory_rewards,
                     zones=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)], discount=0.99,
                     dist_scale=0.1, kin_rel_weight=0, kin_norm=True
-                )
+                ),
+                shift=[0.0, 0.0, -0.25]
             ),
             interpolate=interpolate_poses,
             clamped=True,
             safe_dist=1,
             safe_rot=3.2,
-            pos_only=True,
-            dt_publish=0.02
+            pos_only=False,
+            dt_publish=0.02,
         )
 
 

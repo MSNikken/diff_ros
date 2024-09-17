@@ -26,7 +26,10 @@ wandb_dict = runpaths = {
     'ddbrf2': 'dl_rob/diffusion/39nhtqjg',
     'kdbrf2': 'dl_rob/diffusion/j7bsphez',
     'dsb2': 'dl_rob/diffusion/mynpt464',
+    'dsb3': 'dl_rob/diffusion/3c44y0j9',
+    'ddb3': 'dl_rob/diffusion/fif65974'
 }
+
 
 class Config(ParamsProto):
     # misc
