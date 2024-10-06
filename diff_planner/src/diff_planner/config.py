@@ -27,7 +27,15 @@ wandb_dict = runpaths = {
     'kdbrf2': 'dl_rob/diffusion/j7bsphez',
     'dsb2': 'dl_rob/diffusion/mynpt464',
     'dsb3': 'dl_rob/diffusion/3c44y0j9',
-    'ddb3': 'dl_rob/diffusion/fif65974'
+    'ddb3': 'dl_rob/diffusion/fif65974',
+
+    'scn1_dense': 'dl_rob/diffusion/eiojupzx',
+    'scn1_sparse': 'dl_rob/diffusion/bhi4i7vh',
+    'scn2_dense': 'dl_rob/diffusion/5wqqhflh',
+    'scn2_sparse': 'dl_rob/diffusion/fv6dvdp2',
+    'scn3_dense': 'dl_rob/diffusion/s9qxlvqh',
+    'scn3_sparse': 'dl_rob/diffusion/rczqxeiz',
+
 }
 
 
