@@ -278,7 +278,7 @@ def pose_pytorch2ros(pose: torch.Tensor, counter: int, norm=True):
     pose_stamped = PoseStamped()
     pose_stamped.header.seq = counter
     pose_stamped.header.stamp = rospy.Time.now()
-    pose_stamped.header.frame_id = "global"
+    pose_stamped.header.frame_id = "panda_link0"
 
     pose_stamped.pose.position.x = pose[0]
     pose_stamped.pose.position.y = pose[1]
