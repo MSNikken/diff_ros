@@ -12,6 +12,7 @@ import actionlib
 import tf.transformations
 import pypose as pp
 from diff_planner.config import load_diff_model
+from diffuser.models.guide import CostComposite, GuideManagerTrajectories
 from diffuser.utils import apply_dict
 from franka_msgs.msg import FrankaState
 from geometry_msgs.msg import PoseStamped
@@ -20,7 +21,8 @@ from diff_planner_msgs.msg import PlanPathAction
 
 
 class BaseDiffusionPlanner(object):
-    def __init__(self, horizon, dt_plan, state_dim, action_dim, device, t_start=None, replan_every=None, waypoints=False):
+    def __init__(self, horizon, dt_plan, state_dim, action_dim, device, t_start=None, replan_every=None,
+                 waypoints=False):
         self.device = device
         self.horizon = horizon
         self.state_dim = state_dim
@@ -30,6 +32,7 @@ class BaseDiffusionPlanner(object):
         self.action = torch.empty((horizon, action_dim), device=device)
         self.plan_t_start = t_start if t_start is not None else time.time_ns()
         self.waypoints = waypoints
+        self.nr_setpoints = 0  # nr setpoints since replan
 
         self.obs_indices = set()
         self.latest_obs = torch.empty(state_dim, device=device)
@@ -44,28 +47,30 @@ class BaseDiffusionPlanner(object):
     def add_observation(self, obs, t=None):
         self.latest_obs = obs
 
-        obs_index = self.get_index(t)
-        if obs_index >= self.horizon - 1:  # Final state is always goal state
-            return
-        self.plan[obs_index] = obs
-        self.obs_indices.add(obs_index)
+        # obs_index = self.get_index(t)
+        # if obs_index >= self.horizon - 1:  # Final state is always goal state
+        #     return
+        # self.plan[obs_index] = obs
+        # self.obs_indices.add(obs_index)
 
     def generate_plan(self, start, end, start_time=None):
         self.plan = torch.empty((self.horizon, self.state_dim), device=self.device)
         self.action = torch.empty((self.horizon, self.action_dim), device=self.device)
         self.last_action_index = None
+        self.nr_setpoints = 0
         self.plan[-1] = end
         self.obs_indices = {-1}
 
         self.set_plan_start(start_time)
         self.add_observation(start, self.plan_t_start)
 
-        self.update_plan()
+        return self.update_plan()
 
     def replan(self, start_index, t=None):
         self.last_replan_index = start_index  # Before updating plan to correctly shift conditions
         self.update_plan(start_index=start_index)
         self.last_replan_time = t if t is not None else time.time_ns()
+        self.nr_setpoints = 0
 
     def update_plan(self, start_index=0):
         raise NotImplementedError
@@ -83,6 +88,7 @@ class BaseDiffusionPlanner(object):
         self.horizon = new_horizon
 
     def get_setpoint(self, **kwargs):
+        self.nr_setpoints += 1
         if self.waypoints:
             return self.get_setpoint_from_waypoints(**kwargs)
         else:
@@ -94,32 +100,44 @@ class BaseDiffusionPlanner(object):
         print(f'Getting action {action_index}')
         if final:
             print(f'Final action t={t}, tstart={self.plan_t_start}')
-            return self.action[-1], True
+            return self.action[-1], None, True
 
-        if (action_index > self.replan_every and action_index - self.last_replan_index >= self.replan_every
-                and torch.linalg.vector_norm(self.plan[-1][:3] - self.latest_obs[:3]) > 0.10):
+        new_plan = (action_index > self.replan_every and action_index - self.last_replan_index >= self.replan_every
+                    and torch.linalg.vector_norm(self.plan[-1][:3] - self.latest_obs[:3]) > 0.10)
+        replan = None
+        if new_plan:
             self.replan(action_index, t=t)
+            replan = self.action
 
         if interpolate is None:
             setpoint = self.action[action_index],
         else:
             setpoint = interpolate(self.action[action_index], self.action[action_index + 1], remainder)
-        return setpoint, final
+        return setpoint, replan, final
 
     def get_setpoint_from_waypoints(self, dist=0, interpolate=None, **kwargs):
+        # Check replan
+        replan = (self.nr_setpoints >= self.replan_every and
+                  torch.linalg.vector_norm(self.plan[-1][:3] - self.latest_obs[:3]) > 0.10)
+        if replan:
+            print('Replanning')
+            self.replan(start_index=self.last_action_index)
+            self.last_action = self.action[self.last_action_index]
+        new_plan = self.action if replan else None
+
         # Start new path
         if self.last_action_index is None:
             print('Starting new waypoint path')
             self.last_action_index = 0
             self.last_action = self.action[0]
-            return self.action[0], False
+            return self.action[0], new_plan, False
 
         next_waypoint_idx = self.last_action_index + 1
         if next_waypoint_idx >= self.horizon:
-            return self.action[-1], True
+            return self.action[-1], new_plan, True
 
         # Calculate next setpoint
-        next_dist_from_prev_wp = dist_weight_SE3(self.action[next_waypoint_idx-1], self.last_action) + dist
+        next_dist_from_prev_wp = dist_weight_SE3(self.action[next_waypoint_idx - 1], self.last_action) + dist
         dist_to_next_wp = dist_weight_SE3(self.last_action, self.action[next_waypoint_idx])
         while dist_to_next_wp < dist:
             # Recalculate distances relative to next waypoint
@@ -131,14 +149,14 @@ class BaseDiffusionPlanner(object):
                 print('Waypoints finished')
                 self.last_action_index = len(self.action) - 1
                 self.last_action = self.action[-1]
-                return self.action[-1], True
-            dist_to_next_wp = dist_weight_SE3(self.action[next_waypoint_idx-1], self.action[next_waypoint_idx])
+                return self.action[-1], new_plan, True
+            dist_to_next_wp = dist_weight_SE3(self.action[next_waypoint_idx - 1], self.action[next_waypoint_idx])
         progress_between_wp = next_dist_from_prev_wp / (next_dist_from_prev_wp + dist_to_next_wp)
-        setpoint = interpolate(self.action[next_waypoint_idx-1], self.action[next_waypoint_idx], progress_between_wp)
-        self.last_action_index = next_waypoint_idx-1
+        setpoint = interpolate(self.action[next_waypoint_idx - 1], self.action[next_waypoint_idx], progress_between_wp)
+        self.last_action_index = next_waypoint_idx - 1
         self.last_action = setpoint
-        print(f'Action towards waypoint {next_waypoint_idx}, {int(progress_between_wp*100)}%')
-        return setpoint, False
+        print(f'Action towards waypoint {next_waypoint_idx}, {int(progress_between_wp * 100)}%')
+        return setpoint, new_plan, False
 
     def get_index(self, t=None, remainder=False):
         if t is None:
@@ -164,7 +182,8 @@ class MockPlanner(BaseDiffusionPlanner):
 
 class GausInvDynPlanner(BaseDiffusionPlanner):
     def __init__(self, model, horizon, dt_plan, state_dim, action_dim, device, mode='pos', min_horizon=0, rew_fn=None,
-                 n_samples=1, returns=None, auto=False, vel=0.005, shift=None, **kwargs):
+                 n_samples=1, returns=None, auto=False, vel=0.005, shift=None, cost_guide=False, obstacles=None,
+                 obst_cost_weight=0.1, ee_cost_weight=0.01, **kwargs):
         super().__init__(horizon, dt_plan, state_dim, action_dim, device, **kwargs)
         if mode not in ['pos', 'vel']:
             raise AttributeError('Invalid action mode.')
@@ -174,7 +193,14 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         self.rew_fn = rew_fn
         self.n_samples = n_samples
         self.returns = returns
-        #assert auto and rew_fn is not None or not auto
+
+        # Optional cost function guidance
+        self.cost_guide = cost_guide
+        self.obstacles = obstacles
+        self.obst_cost_weight = obst_cost_weight
+        self.ee_cost_weight = ee_cost_weight
+
+        # assert auto and rew_fn is not None or not auto
         self.auto = auto
         self.vel = vel
         if shift is None:
@@ -190,6 +216,7 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         if self.mode == 'pos':
             self.action[0:-1] = self.plan[1:, :7]
             self.action[-1] = self.plan[-1, :7]
+            return self.plan
         else:
             raise NotImplementedError
             # self.action[now:-self.sample_step_index] = self.plan[now + 1:, 7:13]
@@ -206,7 +233,7 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         if horizon < self.min_horizon:
             add_states = self.min_horizon - horizon
         add_states += (4 - (horizon + add_states) % 4) % 4  # Find next multiple of 4
-        add_states += 4
+        add_states += 4  # Repeated inpainting for better inpainting quality
         sample_horizon = horizon + add_states
 
         unnorm_plan = self.plan - self.shift
@@ -231,8 +258,16 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
         else:
             returns = None
 
+        # Optional cost guidance
+        guide = None
+        if self.cost_guide:
+            cost = CostComposite([partial(reward.cost_collision, self.obstacles), partial(reward.cost_ee, unnorm_plan[-1])],
+                                 weights=[self.obst_cost_weight, self.ee_cost_weight])
+            guide = GuideManagerTrajectories(cost, self.model.normalizer, clip_grad=True)
+
+
         print('Forward pass...')
-        norm_plan = self.model.conditional_sample(conditions, horizon=sample_horizon, returns=returns)
+        norm_plan = self.model.conditional_sample(conditions, horizon=sample_horizon, returns=returns, guide=guide)
         print('Unnormalizing...')
         unnorm_plan = self.model.normalizer.unnormalize(norm_plan, 'observations')[:, :horizon]
         best_plan_index = best_plan(unnorm_plan, self.rew_fn)
@@ -241,19 +276,20 @@ class GausInvDynPlanner(BaseDiffusionPlanner):
     def auto_plan(self, start_index):
         start = self.latest_obs
         goal = self.plan[-1]
-        #return_estimate = (self.rew_fn(start[None, None, :]) + self.rew_fn(goal[None, None, :])) / 10 + 0.01
-        #return_estimate = torch.clamp(return_estimate, min=-0.15, max=0)
+        # return_estimate = (self.rew_fn(start[None, None, :]) + self.rew_fn(goal[None, None, :])) / 10 + 0.01
+        # return_estimate = torch.clamp(return_estimate, min=-0.15, max=0)
         return_estimate = self.returns
-        #horizon_estimate = max(int(torch.linalg.vector_norm(goal[:3] - start[:3])/self.vel), self.min_horizon) + start_index
-        #horizon_estimate = min(max(horizon_estimate, self.min_horizon), 10*self.min_horizon)
+        # horizon_estimate = max(int(torch.linalg.vector_norm(goal[:3] - start[:3])/self.vel), self.min_horizon) + start_index
+        # horizon_estimate = min(max(horizon_estimate, self.min_horizon), 10*self.min_horizon)
         pregoal = self.plan[-2]
         if (torch.abs(goal[:3] - pregoal[:3]) < 0.05).all() or start_index < 5:
             horizon_estimate = self.horizon
         else:
-            horizon_estimate = self.horizon + int(self.replan_every/2)
+            horizon_estimate = self.horizon + int(self.replan_every / 2)
 
         self.update_horizon(horizon_estimate)
-        print(f'Auto sampling with return: {return_estimate} and horizon: {self.horizon}, horizon to go: {self.horizon - start_index}')
+        print(
+            f'Auto sampling with return: {return_estimate} and horizon: {self.horizon}, horizon to go: {self.horizon - start_index}')
         self.sample_plan(self.horizon - start_index, n_samples=self.n_samples, returns=return_estimate)
 
 
@@ -308,7 +344,19 @@ def pose_franka2pytorch(msg, **kwargs):
     return pose
 
 
-def dist_weight_SE3(pose1, pose2, pos_weight=1, rot_weight=0.15):
+def path_pytorch2ros(poses, counter: int):
+    path = Path()
+
+    path.header.seq = counter
+    path.header.stamp = rospy.Time.now()
+    path.header.frame_id = "panda_link0"
+
+    for i, pose in enumerate(poses):
+        path.poses.append(pose_pytorch2ros(pose, i))
+    return path
+
+
+def dist_weight_SE3(pose1, pose2, pos_weight=1, rot_weight=0.25):
     pos_dist = torch.linalg.vector_norm(pose2[:3] - pose1[:3], dim=-1)
     rot1 = pp.SO3(pose1[3:] / torch.linalg.vector_norm(pose1[3:]))
     rot2 = pp.SO3(pose2[3:] / torch.linalg.vector_norm(pose2[3:]))
@@ -335,22 +383,24 @@ def best_plan(unnorm_plan, fn=None):
 
 class PosePlanner(object):
     def __init__(self, planner: DiffPlanner, interpolate=None, clamped=True, dt_publish=None,
-                 safe_dist=0.05, safe_rot=np.pi/18, pos_only=False, wp_dist=None):
+                 safe_dist=0.05, safe_rot=np.pi / 18, pos_only=False, wp_dist=None):
         self.planner = planner
         self.dt_plan = planner.dt_plan
         self.dt_publish = self.dt_plan if dt_publish is None else dt_publish
         self.dt_sample = self.dt_plan if not hasattr(planner, 'dt_sample') else planner.dt_sample
 
         self.sub = rospy.Subscriber('franka_state_controller/franka_states', FrankaState, self.observation_cb)
-        #self.pub = rospy.Publisher('setpoint', PoseStamped, queue_size=1)
+        # self.pub = rospy.Publisher('setpoint', PoseStamped, queue_size=1)
         self.pub = rospy.Publisher('cartesian_impedance_example_controller/equilibrium_pose', PoseStamped, queue_size=1)
         self.pub_updates = rospy.Publisher('setpoint_updates', PoseStamped, queue_size=1)
+        self.pub_plan = rospy.Publisher('planned_path', Path, queue_size=1)
 
         self.interpolate = interpolate
         self.last_pose = torch.empty((7,), device=self.planner.device)
         self.setpoint = torch.empty((7,), device=self.planner.device)
         self.goal = torch.empty((7,), device=self.planner.device)
-        self.counter = 0
+        self.pose_count = 0
+        self.plan_count = 0
         self.final = False
 
         self.clamped = clamped
@@ -373,7 +423,7 @@ class PosePlanner(object):
         self.last_pose = pose
 
     def publish_cb(self, *args):
-        setpoint = pose_pytorch2ros(self.setpoint, self.counter)
+        setpoint = pose_pytorch2ros(self.setpoint, self.pose_count)
 
         # Safety
         if self.pos_only:
@@ -415,7 +465,7 @@ class PosePlanner(object):
             return
 
         self.pub.publish(setpoint)
-        self.counter += 1
+        self.pose_count += 1
 
     def plan_cb(self, goal):
         r = rospy.Rate(int(np.round(1 / self.dt_sample)))
@@ -423,34 +473,39 @@ class PosePlanner(object):
 
         rospy.loginfo(f'Generating plan...')
         tstart = rospy.Time().now()
-        self.planner.generate_plan(self.last_pose, self.goal)
+        plan = self.planner.generate_plan(self.last_pose, self.goal)
         duration = rospy.Time().now() - tstart
         rospy.loginfo(f'Finished plan generation in {(duration.secs + duration.nsecs / 1e9):.3f} seconds')
+        self.pub_plan.publish(path_pytorch2ros(plan, self.plan_count))
+        self.plan_count += 1
 
         self.final = False
         self.planner.set_plan_start()
         while not self.final and not rospy.is_shutdown():
-            setpoint = self.next_pose()
+            setpoint, plan = self.next_pose()
             if setpoint is None:
                 continue
+            if plan is not None:
+                self.pub_plan.publish(path_pytorch2ros(plan, self.plan_count))
+                self.plan_count += 1
             self.update_setpoint(setpoint)
             r.sleep()
         self._as.set_aborted()
 
     def update_setpoint(self, new):
         self.setpoint = new
-        self.pub_updates.publish(pose_pytorch2ros(new, self.counter))
+        self.pub_updates.publish(pose_pytorch2ros(new, self.pose_count))
 
     def next_pose(self):
         if self.final:
             rospy.loginfo('Planner reached final state')
             return None
-        setpoint, self.final = self.planner.get_setpoint(interpolate=self.interpolate, dist=self.wp_dist)
+        setpoint, plan, self.final = self.planner.get_setpoint(interpolate=self.interpolate, dist=self.wp_dist)
         if setpoint is None:
             rospy.logwarn('No setpoint available')
             self.final = True
             return None
-        return setpoint
+        return setpoint, plan
 
     def wait_for_initial_pose(self):
         msg = rospy.wait_for_message("franka_state_controller/franka_states", FrankaState)
@@ -474,19 +529,21 @@ def run_node():
         planner = PosePlanner(
             GausInvDynPlanner(
                 model, 120, 0.08, 7, 7, device, auto=True,
-                replan_every=100, min_horizon=32, returns=-0.01, n_samples=10,
+                replan_every=61, min_horizon=32, returns=-0.01, n_samples=10,
                 rew_fn=partial(
                     reward.discounted_trajectory_rewards,
-                    # zones=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)],
-                    zones=[reward.Zone(xmin=0.3, ymin=-0.15, zmin=0.3, xmax=0.41, ymax=-0.05, zmax=0.6),
-                           reward.Zone(xmin=0.39, ymin=0.05, zmin=0.3, xmax=0.5, ymax=0.15, zmax=0.6)],
+                    zones=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)],
+                    # zones=[reward.Zone(xmin=0.3, ymin=-0.15, zmin=0.3, xmax=0.41, ymax=-0.05, zmax=0.6),
+                    #        reward.Zone(xmin=0.39, ymin=0.05, zmin=0.3, xmax=0.5, ymax=0.15, zmax=0.6)],
                     # zones=[reward.Zone(xmin=0.3, ymin=0.0, zmin=0.3, xmax=0.5, ymax=0.25, zmax=0.4),
                     #       reward.Zone(xmin=0.3, ymin=-0.05, zmin=0.3, xmax=0.4, ymax=0.05, zmax=0.6)],
                     discount=0.99,
                     dist_scale=0.1, kin_rel_weight=0, kin_norm=True
                 ),
                 waypoints=True,
-                #shift=[0.0, 0.0, -0.25]
+                cost_guide=True,
+                obstacles=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)],
+                # shift=[0.0, 0.0, -0.25]
                 shift=[0.0, 0.0, 0.0]
             ),
             interpolate=interpolate_poses,
