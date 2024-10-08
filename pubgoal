@@ -1,0 +1,1 @@
+rostopic pub -1 /plan/goal diff_planner_msgs/PlanPathActionGoal '{header: {seq: 0, stamp: now, frame_id: "map"}, goal_id: {stamp: now, id: 'a'}, goal: {goal_pose: {header: {seq: 0, stamp: now, frame_id: "map"}, pose: {position: {x: 0.4, y: -0.15, z: 0.4}, orientation: {x: 1.0, y: 0.0, z: 0.0, w: 0.0}}}}}'
