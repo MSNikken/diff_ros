@@ -533,18 +533,13 @@ def run_node():
                 rew_fn=partial(
                     reward.discounted_trajectory_rewards,
                     zones=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)],
-                    # zones=[reward.Zone(xmin=0.3, ymin=-0.15, zmin=0.3, xmax=0.41, ymax=-0.05, zmax=0.6),
-                    #        reward.Zone(xmin=0.39, ymin=0.05, zmin=0.3, xmax=0.5, ymax=0.15, zmax=0.6)],
-                    # zones=[reward.Zone(xmin=0.3, ymin=0.0, zmin=0.3, xmax=0.5, ymax=0.25, zmax=0.4),
-                    #       reward.Zone(xmin=0.3, ymin=-0.05, zmin=0.3, xmax=0.4, ymax=0.05, zmax=0.6)],
                     discount=0.99,
                     dist_scale=0.1, kin_rel_weight=0, kin_norm=True
                 ),
                 waypoints=True,
                 cost_guide=True,
                 obstacles=[reward.Zone(xmin=0.3, ymin=-0.1, zmin=0.3, xmax=0.5, ymax=0.1, zmax=0.45)],
-                # shift=[0.0, 0.0, -0.25]
-                shift=[0.0, 0.0, 0.0]
+                shift=[0.0, 0.0, 0.0]  # Shift workspace in cartesian direction
             ),
             interpolate=interpolate_poses,
             clamped=True,
