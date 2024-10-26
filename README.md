@@ -24,4 +24,4 @@ Run the planner node using:
 rosrun diff_planner diff_planner
 ```
 The 'diff_planner' node publishes setpoints that can be used by the `cartesian_impedance_example_controller` provided by Franka Robotics.
-Note that `planners.py` contains safety features, liking clamping the outputs, that can currently only be adjusted by editing `planners.py`.
+Note that `planners.py` contains safety features and planning settings, liking clamping the outputs or setting the planning horizon, that can currently only be adjusted by editing `planners.py`.
