@@ -1,0 +1,23 @@
+<launch>
+    <!-- Diffusion Configuration -->
+    <arg name="config_file" default="" />
+    <arg name="wandb_file" default="" />
+    <arg name="pt_file" default="" />
+
+    <!-- Franka and Gazebo -->
+    <include file="$(find franka_gazebo)/launch/panda.launch">
+        <arg name="x" value="-0.5" />
+        <arg name="controller" value="cartesian_impedance_example_controller" />
+        <arg name="rviz" value="false" />
+        <arg name="interactive_marker" value="false"/>
+    </include>
+
+    <!-- Diffusion planner -->
+    <node pkg="diff_planner" type="diff_planner" name="diff_planner" respawn="false" output="screen">
+        <param name="mock" value="false" />
+        <param name="config_file" value="$(arg config_file)" unless="$(eval arg('config_file') == '')"/>
+        <param name="wandb_file" value="$(arg wandb_file)" unless="$(eval arg('wandb_file') == '')"/>
+        <param name="pt_file" value="$(arg pt_file)" unless="$(eval arg('pt_file') == '')"/>
+        <remap from="/setpoint" to="/cartesian_impedance_example_controller/equilibrium_pose" />
+    </node>
+</launch>

@@ -1,0 +1,11 @@
+<launch>
+    <arg name="robot" default="panda" doc="choose your robot. Possible values: [panda, fr3]"/>
+    <arg name="arm_id" default="$(arg robot)" />
+    <arg name="load_gripper" default="true" />
+    <arg name="xacro_args" default="" />
+    <param name="robot_description" command="$(find xacro)/xacro $(find franka_description)/robots/$(arg robot)/$(arg robot).urdf.xacro hand:=$(arg load_gripper) arm_id:=$(arg arm_id) $(arg xacro_args)"/>
+    <node pkg="rviz" type="rviz" output="screen" name="rviz" args="-d $(find franka_example_controllers)/launch/rviz/franka_description_with_marker.rviz"/>
+    <node pkg="tf2_ros" type="static_transform_publisher" name="link1_broadcaster" args="0 0 0.107 0 0 0 1 panda_link7 panda_link8" />
+    <node pkg="tf2_ros" type="static_transform_publisher" name="link2_broadcaster" args="0 0 0 0 0 -0.3826834 0.9238795 panda_link8 panda_hand" />
+ </launch>
+
